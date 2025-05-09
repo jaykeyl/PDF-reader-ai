@@ -1,93 +1,103 @@
 const express = require("express");
-const multer = require("multer");
-const fs = require("fs");
+const AWS = require("aws-sdk");
 const pdf = require("pdf-parse");
-const app = express();
-const bodyParser = require("body-parser");
 const cors = require("cors");
+const multer = require("multer");
 require("dotenv").config();
 
 const {
   GoogleGenerativeAI,
-  HarmCategory,
-  HarmBlockThreshold,
 } = require("@google/generative-ai");
-const { GoogleAIFileManager } = require("@google/generative-ai/server");
 
-const apiKey = process.env.GEMINI_API_KEY;
-const genAI = new GoogleGenerativeAI(apiKey);
-
-const upload = multer({ dest: "uploads/" });
-
-app.use(bodyParser.json()); // support json encoded bodies
-app.use(bodyParser.urlencoded({ extended: false }));
+const app = express();
+app.use(express.json());
 app.use(cors());
 
-const model = genAI.getGenerativeModel({
-  model: "gemini-2.0-flash-exp",
+// AWS S3 config con IAM
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,  
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,  
+  region: process.env.AWS_REGION,  
 });
 
+// Crear una instancia de S3
+const s3 = new AWS.S3();
+
+// gemini config
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+
 const generationConfig = {
-  temperature: 1,
-  topP: 0.95,
-  topK: 40,
-  maxOutputTokens: 8192,
-  responseMimeType: "text/plain",
+  temperature: 0.8,
+  topP: 0.9,
+  maxOutputTokens: 2048,
 };
 
-async function run(filePath, filename, mimeType) {
-  const extractTextFromPDF = async (filePath) => {
-    const pdfBuffer = fs.readFileSync(filePath);
-    const data = await pdf(pdfBuffer);
-    return data.text;
+const storage = multer.memoryStorage();  
+const upload = multer({ storage: storage });
+
+// subir el PDF a S3
+async function uploadPdfToS3(pdfBuffer, fileName) {
+  const params = {
+    Bucket: process.env.S3_BUCKET, 
+    Key: fileName,  
+    Body: pdfBuffer,
+    ContentType: 'application/pdf',
   };
 
-  const pdfText = await extractTextFromPDF(filePath);
-
   try {
-    const prompt = `summarize this pdf: `;
-    const result = await model.generateContent([prompt, pdfText], generationConfig);
-    return result.response.text();
-  } catch (error) {
-    console.error("Error in model.generateContent:", error);
+    const data = await s3.upload(params).promise();
+    console.log("Archivo subido a S3:", data);
+    return data.Key; 
+  } catch (err) {
+    console.error("Error al subir el archivo a S3:", err);
+    throw err;
   }
 }
 
-app.post("/gemini", upload.single("pdf"), async (req, res) => {
+// extraer texto del PDF
+async function extractPdfFromS3(bucket, key) {
+  const s3Object = await s3.getObject({ Bucket: bucket, Key: key }).promise();
+  const pdfBuffer = s3Object.Body;
+  const data = await pdf(pdfBuffer);
+  return data.text;
+}
+
+// procesar el archivo PDF
+app.post("/process-pdf", upload.single("pdf"), async (req, res) => {
+  const { userPrompt } = req.body;
+
+  if (!req.file) {
+    return res.status(400).json({ message: "Por favor selecciona un archivo PDF." });
+  }
+
+  if (!userPrompt) {
+    return res.status(400).json({ message: "Falta el prompt personalizado." });
+  }
+
   try {
-    const file = req.file;
+    // Subir el archivo PDF a S3
+    const pdfKey = await uploadPdfToS3(req.file.buffer, req.file.originalname);
 
-    if (!file) {
-      return res.status(400).json({ message: "No file uploaded." });
-    }
+    // Extraer el texto del PDF desde S3
+    const text = await extractPdfFromS3(process.env.S3_BUCKET, pdfKey);
+    console.log("Texto extraído del PDF:", text.substring(0, 100));  // Para debug
 
-    if (file.mimetype !== "application/pdf") {
-      fs.unlinkSync(file.path);
-      return res.status(400).json({ message: "Only PDF files are allowed." });
-    }
+    const prompt = `${userPrompt}\n\nContenido del PDF:\n${text}`;
 
-    try {
-      const geminiFile = await run(file.path, file.originalname, file.mimetype);
-      res.status(200).json({
-        message: "File uploaded successfully.",
-        geminiFile,
-      });
-    } catch (error) {
-      console.error("Error in model.generateContent:", error);
-      res.status(500).json({ message: "Error in model.generateContent" });
-    }
+    // Llamar al modelo de Gemini para analizar el PDF
+    const result = await model.generateContent([prompt], generationConfig);
+    const output = result.response.text();
+
+    res.status(200).json({ analysis: output });
   } catch (error) {
-    res.status(500).json({ message: "Error with post" });
+    console.error("Error al procesar el PDF:", error);
+    res.status(500).json({ message: "Error procesando el PDF." });
   }
 });
 
-app.use((req, res) => {
-  return res.status(404).send({ message: "The url you visited does not exist" });
-});
-
-// ✅ ESTO FALTABA
+// Iniciar servidor
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
-  console.log(`Servidor backend corriendo en http://localhost:${PORT}`);
+  console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
