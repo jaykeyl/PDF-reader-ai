@@ -1,23 +1,33 @@
-import logo from './logo.svg';
+import { useState } from 'react';
 import './App.css';
 
 function App() {
+  const [file, setFile] = useState(null);
+  const [result, setResult] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const formData = new FormData();
+    formData.append('pdf', file);
+
+    const response = await fetch('http://localhost:3000/gemini', {
+      method: 'POST',
+      body: formData
+    });
+    const data = await response.json();
+    setResult(data.geminiFile);
+  };
+
   return (
     <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
+      <form onSubmit={handleSubmit}>
+        <input type="file" onChange={(e) => setFile(e.target.files[0])} />
+        <button type="submit">Procesar PDF</button>
+      </form>
+      <div className="result">
+        <h3>Resultado:</h3>
+        <p>{result}</p>
+      </div>
     </div>
   );
 }
